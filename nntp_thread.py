@@ -13,14 +13,37 @@ import uuid
 import hashlib
 import os
 import glob
-import email 
+import email
+import time 
+
+#!# Ces deux variables permettent d'indiquer l'absence de service
+### disponible et ce malgré la connexion réussie du client. En
+### dehors de certaines étapes de maintenance lourdes, ces états
+### du serveur n'ont que peu d'intérêt. 
+NNTP_SERVEUR_INDISPONIBLE_PERMANENCE = False
+NNTP_SERVEUR_INDISPONIBLE_TEMPORAIRE = False 
+
+#!# La signature de reconnaissance du serveur
+### Script initial mai 2017 
+### Version 0.0.1 / démarrage du projet : 07 juin 2018 
+### Version 0.0.2 : 08 juin 2018 
+NNTP_SERVEUR_SIGNATURE = "nothus 0.0.2 nntp server"
+
+#!# Le verrou en "lecture seule" renvoie le code 201
+### au lieu de 200. Il a pour sens d'indiquer l'impossibilité
+### absolue pour le serveur d'accepter une écriture venant
+### de l'extérieur. Ceci n'a pas de rapport avec les permissions
+### individuelles des groupes et des utilisateurs. 
+VERROU_LECTURE_SEULE = True
 
 class NNTP_Protocole: 
 
     lecteur = False 
-    racineDefaut = "."
+    racineDefaut = "/home/julien/Développement/NNTP2"
 
-    commandes = { 
+    commandes = {
+        
+        # Commandes d'état 
         re.compile(
             "^CAPABILITIES$",
             re.IGNORECASE
@@ -29,6 +52,16 @@ class NNTP_Protocole:
             "^MODE READER$",
             re.IGNORECASE
         ): "nntp_MODE_READER",
+        re.compile(
+            "^AUTHINFO (?P<action>USER|PASS) (?P<info>[a-z0-9\_\-\.\@]+)$",
+            re.IGNORECASE
+        ): "nntp_AUTHINFO",
+        re.compile(
+            "^QUIT$",
+            re.IGNORECASE
+        ): "nntp_QUIT",
+        
+        # Commandes de liste 
         re.compile(
             "^LIST OVERVIEW.FMT$",
             re.IGNORECASE
@@ -42,10 +75,6 @@ class NNTP_Protocole:
             re.IGNORECASE
         ): "nntp_LIST_NEWSGROUPS",
         re.compile(
-            "^AUTHINFO (?P<action>USER|PASS) (?P<info>[a-z0-9\_\-\.\@]+)$",
-            re.IGNORECASE
-        ): "nntp_AUTHINFO",
-        re.compile(
             "^GROUP (?P<groupe>[a-z0-9\.]+)$",
             re.IGNORECASE
         ): "nntp_GROUP",
@@ -53,6 +82,16 @@ class NNTP_Protocole:
             "^XOVER (?P<mini>[0-9]+)\-(?P<maxi>[0-9]+)$",
             re.IGNORECASE
         ): "nntp_XOVER_RANGE",
+        
+        # Commandes de récupération de contenus 
+        re.compile( 
+            "^HEAD$",
+            re.IGNORECASE
+        ): "nntp_HEAD", 
+        re.compile( 
+            "^HEAD (?P<article>[0-9]+)$",
+            re.IGNORECASE
+        ): "nntp_HEAD_NUMERO", 
         re.compile(
             "^ARTICLE$",
             re.IGNORECASE
@@ -65,14 +104,23 @@ class NNTP_Protocole:
             "^ARTICLE \<(?P<articleId>[0-9a-z\-\_]+)(\@(?P<domaine>[^\s\>]*))\>$",
             re.IGNORECASE
         ): "nntp_ARTICLE_ID", 
-        re.compile(
-            "^QUIT$",
-            re.IGNORECASE
-        ): "nntp_QUIT", 
+        
+        # Commandes de publication 
         re.compile(
             "^POST$",
             re.IGNORECASE
-        ): "nntp_POST" 
+        ): "nntp_POST",
+
+        # Commandes d'informations 
+        re.compile(
+            "^DATE$",
+            re.IGNORECASE
+        ): "nntp_DATE", 
+        re.compile(
+            "^HELP$",
+            re.IGNORECASE
+        ): "nntp_HELP" 
+        
     }
 
     def __init__(self, client):
@@ -80,10 +128,26 @@ class NNTP_Protocole:
         self.utilisateur = None 
         self.mdp = None
         self.groupe = None
-        self.racine = None 
-        self.client.envoyer(
-            "200 jacoboni InterNetNews server INN 2.2 21-Jan-1999 ready"
-        ) 
+        self.racine = None
+        if NNTP_SERVEUR_INDISPONIBLE_PERMANENCE:
+            self.client.envoyer(
+                "502 server permanently unavailable"
+            )
+            self.client.stopper() 
+        elif NNTP_SERVEUR_INDISPONIBLE_TEMPORAIRE:
+            self.client.envoyer(
+                "400 server temporarily unavailable"
+            )
+            self.client.stopper() 
+        else: 
+            self.client.envoyer(
+                "%s %s ready"%(
+                    (
+                        201 if VERROU_LECTURE_SEULE==True else 200 
+                    ), 
+                    NNTP_SERVEUR_SIGNATURE
+                ) 
+            ) 
 
     def resoudre(self):
         self.cmd = self.client.recevoir()
@@ -108,30 +172,109 @@ class NNTP_Protocole:
                     self.client.envoyer(
                         "KO methode non implementee"
                     )
-                    return
+                    return 
 
-    def nntp_QUIT(self,r):
-        self.client.stopper() 
-
-    def nntp_MODE_CAPABILITIES(self, r): 
-        self.client.envoyer( 
-            (
-                "101 Server capabilities", 
-                "VERSION 2", 
-                "READER", 
-                "OVER", 
-                "POST", 
-                "LIST ACTIVE NEWSGROUPS ACTIVE.TIMES OVERVIEW.FMT", 
-                "OVER MSGID", 
-                "."
+    def recuperer_article(self, path, articleNumero, articleId, entete=True, corps=True): 
+        with open(path, "r") as f: 
+            self.client.envoyer( 
+                "220 %s %s"%( 
+                    articleNumero,
+                    articleId
+                ) 
+            )
+            partieLue = 0 
+            while True:
+                ligne = f.readline()
+                envoi = False 
+                if ligne=="":
+                    break
+                elif partieLue==0 and ligne=="\n":
+                    partieLue = 1 
+                else: 
+                    ligne = ligne.strip() 
+                    if ligne==".": 
+                        ligne = ".." 
+                if entete and partieLue<1: 
+                    envoi = True 
+                elif corps and partieLue>0: 
+                    envoi = True 
+                if envoi: 
+                    self.client.envoyer( 
+                       ligne 
+                    ) 
+            self.client.envoyer( 
+                "." 
             ) 
+
+    def nntp_CAPABILITIES(self, r):
+        """     Commande "CAPABILITIES"
+        -> interroge le serveurs sur ses capacités et les
+        fonctions qu'il offre 
+        """
+        #TODO# antémémoire à corriger ici
+        self.client.envoyer(
+            "101 server capabilities"
         ) 
+        if VERROU_LECTURE_SEULE:
+            self.client.envoyer(
+                (
+                    "101 server capabilities",
+                    "VERSION 2", 
+                    "READER", 
+                    "LIST ACTIVE NEWSGROUPS", 
+                    "." 
+                ) 
+            )
+        else: 
+            self.client.envoyer( 
+                ( 
+                    "VERSION 2", 
+                    "READER", 
+                    "OVER", 
+                    "POST", 
+                    "LIST ACTIVE NEWSGROUPS ACTIVE.TIMES OVERVIEW.FMT", 
+                    "OVER MSGID", 
+                    "."
+                ) 
+            ) 
 
     def nntp_MODE_READER(self, r):
-        self.lecteur = True 
-        self.client.envoyer( 
-            "200 Server ready, posting allowed" 
-        )
+        """     Commande "MODE READER"
+        -> permet d'indiquer un mode serveur-client
+        
+        nb : le cas d'un retour 502 est improbable malgré son
+        ajout dans la RCF : dès la connexion au serveur,
+        en cas d'indisponibilité permanente confirmée
+        dans les paramêtres, la connexion est coupée
+        après l'information du client... 
+        """
+        if NNTP_SERVEUR_INDISPONIBLE_PERMANENCE:
+            self.client.envoyer(
+                "502 server permanently unavailable"
+            ) 
+            self.client.stopper()
+        else: 
+            self.lecteur = True 
+            self.client.envoyer(
+                "%s Server ready, posting %s allowed"%(
+                    (
+                        201 if VERROU_LECTURE_SEULE==True else 200 
+                    ), 
+                    (
+                        "not" if VERROU_LECTURE_SEULE==True else "" 
+                    ) 
+                )  
+            )
+
+    def nntp_QUIT(self,r):
+        """     Commande "QUIT"
+        -> permet la connexion "propre" d'une client, après
+        signalement
+        """ 
+        self.client.envoyer(
+            "205 connection will be closed immediatly" 
+        ) 
+        self.client.stopper() 
 
     def nntp_LIST_OVERVIEWFMT(self, r):
         self.client.envoyer( 
@@ -158,7 +301,7 @@ class NNTP_Protocole:
             "215 list of newsgroups follows" 
         )
         with open(
-            "%s/.groupes"%self.racine,
+            "%s/.groupes"%self.racineDefaut,
             "r"
         ) as f: 
             while True: 
@@ -175,7 +318,7 @@ class NNTP_Protocole:
         )
 
     def traduire_groupe(self, groupe):
-        if re.match("^([a-zA-Z0-9\.]+)$") is None:
+        if re.match("^([a-zA-Z0-9\.]+)$", groupe) is None:
             return False 
         while "." in groupe:
             groupe = groupe.replace(".","/")
@@ -208,7 +351,8 @@ class NNTP_Protocole:
                         groupe
                     ) 
                 )
-            except:
+            except Exception as err:
+                print(err) 
                 self.client.envoyer( 
                     "411 groupe indisponible" 
                 ) 
@@ -218,7 +362,7 @@ class NNTP_Protocole:
             ) 
 
     def nntp_XOVER_RANGE(self, r):
-        if not hasattr(self.client, "groupe"):
+        if not hasattr(self, "groupe"):
             self.client.envoyer(
                 "412 No newsgroup selected"
             )
@@ -235,8 +379,9 @@ class NNTP_Protocole:
             )
             if os.path.isfile(
                 path 
-            ): 
+            ):
                 with open(path, "r") as f:
+                    uid = f.readline().strip() 
                     self.client.envoyer(
                         f.readline().strip() 
                     ) 
@@ -244,26 +389,50 @@ class NNTP_Protocole:
             "." 
         )
 
-    def nntp_ARTICLE(self, r): 
+    def nntp_HEAD(self, r):
         self.client.envoyer(
             "non implemente"
         ) 
 
-    def nntp_ARTICLE_NUMERO(self, r):
-        if not hasattr(self.client, "groupe"):
+    def nntp_HEAD_NUMERO(self, r):
+        self.nntp_ARTICLE_NUMERO(
+            r,
+            entete=True,
+            corps=True 
+        ) 
+
+    def nntp_ARTICLE(self, r): 
+        if not hasattr(self.client, "groupe"): 
             self.client.envoyer( 
                 "412 No newsgroup selected"
             ) 
-        try:
-            article_num = r.group("article")
-            path = "%s/%s.message"%(
-                self.racine,
-                article_num
+        self.client.envoyer(
+            "non implemente"
+        ) 
+
+    def nntp_ARTICLE_NUMERO(self, r, entete=True, corps=True):
+        if not hasattr(self, "groupe"):
+            self.client.envoyer( 
+                "412 No newsgroup selected"
             ) 
-            self.recuperer_article(
-                path
-            )
+        try: 
+            with open( 
+                "%s/%s.message"%( 
+                    self.racine,
+                    r.group("article")
+                ),
+                "r"
+            ) as f: 
+                uid = f.readline().strip() 
+            self.recuperer_article( 
+                "./sources/%s.contenu"%uid, 
+                r.group("article"),
+                uid, 
+                entete, 
+                corps 
+            ) 
         except Exception as err: 
+            print(err) 
             self.client.envoyer(
                 "423 No article with that number" 
             )
@@ -285,30 +454,6 @@ class NNTP_Protocole:
         except Exception: 
             self.client.envoyer(
                 "430 No article with that id" 
-            ) 
-
-    def recuperer_article(self, path): 
-        with open(path, "r") as f: 
-            numero, sujet, expediteur, date, article_id1, *reste = f.readline().strip().split("\t") 
-            self.client.envoyer( 
-                "220 %s %s"%( 
-                    numero,
-                    article_id1
-                ) 
-            ) 
-            while True:
-                ligne = f.readline()
-                if ligne=="":
-                    break
-                else:
-                    ligne = ligne.strip() 
-                    if ligne==".":
-                        ligne = ".." 
-                    self.client.envoyer( 
-                       ligne 
-                    )
-            self.client.envoyer(
-                "."  
             ) 
 
     def nntp_AUTHINFO(self, r):
@@ -353,10 +498,10 @@ class NNTP_Protocole:
                         return self.client.envoyer( 
                             "441 no valid group" 
                         ) 
-                    if not os.path.isdir(
-                        "%s/%s"%(
-                            self.racineDefaut,
-                            chemin
+                    if not os.path.isdir( 
+                        "%s/%s"%( 
+                            self.racineDefaut, 
+                            chemin 
                         ) 
                     ): 
                         return self.client.envoyer( 
@@ -384,6 +529,34 @@ class NNTP_Protocole:
             self.client.envoyer(
                 "441 Posting failed" 
             ) 
+
+    def nntp_DATE(self, r):
+        """     Commande "DATE"
+        -> signale le temps coordonné universel (UTC) du
+        point de vue du serveur 
+
+        Le protocole prévu par la RFC 3977, prévoit que cette 
+        commande soit déclaré implicitement avec la capacité
+         annoncée "READER". 
+        """ 
+        self.client.envoyer(
+            "111 %s"%time.strftime(
+                "%Y%m%d%H%M%S",
+                time.gmtime()
+            )  
+        ) 
+
+    def nntp_HELP(self, r):
+        """     Commande "HELP"
+        -> renvoie un texte d'aide  
+        """ 
+        self.client.envoyer(
+            (
+                "100 help text follows",
+                "... no text for now ...",
+                "."
+            ) 
+        ) 
 
 class NNTP_Client(socketserver.StreamRequestHandler): 
 
@@ -422,10 +595,15 @@ class NNTP_Client(socketserver.StreamRequestHandler):
         if self.debug:
             print("départ d'un client") 
             
-        
+class Serveur(socketserver.TCPServer):
+
+    allow_reuse_address = True 
 
 if __name__ == "__main__":
     HOST, PORT = "localhost", 9999
 
-    with socketserver.TCPServer((HOST, PORT), NNTP_Client) as server:
+    with Serveur(
+        (HOST, PORT),
+        NNTP_Client
+    ) as server:
         server.serve_forever() 
