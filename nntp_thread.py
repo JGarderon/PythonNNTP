@@ -5,6 +5,7 @@
 ### julien.garderon@gmail.com / @intelligencepol sur Twitter
 ### JGarderon sur GitHub 
 
+import sys 
 import socketserver
 import errno
 import types
@@ -16,6 +17,8 @@ import glob
 import email
 import time 
 
+### ### ### ### ### ### ### ### ###
+
 #!# Ces deux variables permettent d'indiquer l'absence de service
 ### disponible et ce malgré la connexion réussie du client. En
 ### dehors de certaines étapes de maintenance lourdes, ces états
@@ -23,11 +26,15 @@ import time
 NNTP_SERVEUR_INDISPONIBLE_PERMANENCE = False
 NNTP_SERVEUR_INDISPONIBLE_TEMPORAIRE = False 
 
+### ### ### ### ### ### ### ### ###
+
 #!# La signature de reconnaissance du serveur
 ### Script initial mai 2017 
 ### Version 0.0.1 / démarrage du projet : 07 juin 2018 
 ### Version 0.0.2 : 08 juin 2018 
 NNTP_SERVEUR_SIGNATURE = "nothus 0.0.2 nntp server"
+
+### ### ### ### ### ### ### ### ###
 
 #!# Le verrou en "lecture seule" renvoie le code 201
 ### au lieu de 200. Il a pour sens d'indiquer l'impossibilité
@@ -35,6 +42,169 @@ NNTP_SERVEUR_SIGNATURE = "nothus 0.0.2 nntp server"
 ### de l'extérieur. Ceci n'a pas de rapport avec les permissions
 ### individuelles des groupes et des utilisateurs. 
 VERROU_LECTURE_SEULE = True
+
+### ### ### ### ### ### ### ### ###
+
+NNTP_UTILISATEURS_SOURCE = "./utilisateurs" 
+NNTP_MESSAGES_SOURCE = "./sources" 
+NNTP_MESSAGES_EXT = "contenu"
+NNTP_MESSAGE_EXT = "message" 
+NNTP_MESSAGE_REF_EXT = "reference"
+NNTP_GROUPES_ARBORESCENCE = "./groupes"
+NNTP_GROUPES_SOURCES = "." 
+
+### ### ### ### ### ### ### ### ###
+
+#!# Les fonctions essentielles, pour faire le lien entre le protocole
+### et le SGBD qui gère concrétement les messages. A noter que
+### l'implémentation par défaut, celle développée ici, s'appuye sur
+### le système de fichiers (c-à-d un SGBD "plat"). 
+
+def utilisateur_hasher(courriel, mdp): 
+    """
+        Ici les fonctions utilisées pour "hasher" les courriels / mdp,
+        indépendamment de l'implémentation même du protocole. 
+    """
+    cId = hashlib.sha256(
+        courriel.encode("utf-8") 
+    ).hexdigest() 
+    pId = hashlib.sha256(
+        (courriel+mdp).encode("utf-8") 
+    ).hexdigest()
+    return cId, pId 
+
+def utilisateur_creer(courriel, mdp): 
+    """
+        La fonction permet aussi bien de créer un nouvel utilisateur,
+        que d'écraser un utilisateur existant (changement de mot de passe
+        par exemple). 
+    """
+    try:
+        cId, pId = utilisateur_hasher(
+            courriel,
+            mdp 
+        ) 
+        with open( 
+            "%s/%s.utilisateur"%(
+                NNTP_UTILISATEURS_SOURCE,
+                cId
+            ),
+            "w" 
+        ) as f:
+            f.write(
+                pId
+            )
+        return True
+    except Exception as err:
+        print("utilisateur_creer", err)
+        return False
+    
+def utilisateur_verifier(courriel, mdp):
+    """
+        Savoir si un client qui s'authentifie, correspond bien à un
+        utilisateur ou non. 
+    """
+    try:
+        cId, pId = utilisateur_hasher(
+            courriel,
+            mdp 
+        ) 
+        with open( 
+            "%s/%s.utilisateur"%(
+                NNTP_UTILISATEURS_SOURCE,
+                cId
+            ),
+            "r" 
+        ) as f: 
+            passe = f.readline().strip() 
+            if passe==pId:
+                return cId
+        return False
+    except Exception as err:
+        print("utilisateur_creer", err)
+        return False
+    
+def groupe_traduire(groupe): 
+    if re.match("^([a-zA-Z0-9\.]+)$", groupe) is None:
+        return False 
+    while "." in groupe:
+        groupe = groupe.replace(".","/")
+        groupe = groupe.replace("//","/")
+    return groupe 
+
+def article_chercher_id(numero, groupe="", traduire_groupe=True): 
+    if traduire_groupe: 
+        pathGroupe = groupe_traduire( 
+            groupe
+        )
+    else:
+        pathGroupe = groupe
+    aId = False 
+    if pathGroupe is not False: 
+        pathRef = "%s/%s/%s.%s" % (
+                NNTP_GROUPES_SOURCES,
+                pathGroupe,
+                numero, 
+                NNTP_MESSAGE_EXT
+        ) 
+        if os.path.isfile(
+            pathRef
+        ): 
+            with open(
+                pathRef,
+                "r"
+            ) as f:
+                aId = f.readline()
+    return (aId, numero) 
+
+def article_chercher_numero(aId, groupe="", traduire_groupe=True): 
+    if traduire_groupe: 
+        pathGroupe = groupe_traduire( 
+            groupe
+        )
+    else:
+        pathGroupe = groupe
+    numero = False 
+    if pathGroupe is not False: 
+        pathRef = "%s/%s/%s.%s" % (
+                NNTP_GROUPES_SOURCES,
+                pathGroupe,
+                aId, 
+                NNTP_MESSAGE_REF_EXT
+        ) 
+        if os.path.isfile(
+            pathRef
+        ): 
+            with open(
+                pathRef,
+                "r"
+            ) as f:
+                numero = int(
+                    f.readline()
+                ) 
+    chemin = "%s/%s.%s" % (
+        NNTP_MESSAGES_SOURCE,
+        aId,
+        NNTP_MESSAGES_EXT
+    ) 
+    if os.path.isfile(
+        chemin 
+    ):
+        return (aId, numero) 
+    return False 
+
+def article_traduire_id(aId, extraire=True):
+    try:
+        if extraire:
+            return re.match( 
+                "\<([^\@\>]+)\@[a-z0-9\.]+\>$", 
+                aId
+            ).groups()[0] 
+    except Exception as err:
+        print("article_traduire_id", err) 
+        return False 
+
+### ### ### ### ### ### ### ### ### 
 
 class NNTP_Protocole: 
 
@@ -82,6 +252,20 @@ class NNTP_Protocole:
             "^XOVER (?P<mini>[0-9]+)\-(?P<maxi>[0-9]+)$",
             re.IGNORECASE
         ): "nntp_XOVER_RANGE",
+        
+        # Commandes de statistiques sur les contenus 
+        re.compile( 
+            "^STAT$",
+            re.IGNORECASE
+        ): "nntp_STAT", 
+        re.compile( 
+            "^STAT (?P<article>[0-9]+)$",
+            re.IGNORECASE
+        ): "nntp_STAT_NUMERO", 
+        re.compile( 
+            "^STAT \<(?P<articleId>[^>]+)\>$",
+            re.IGNORECASE
+        ): "nntp_STAT_ID", 
         
         # Commandes de récupération de contenus 
         re.compile( 
@@ -315,18 +499,10 @@ class NNTP_Protocole:
                 ) 
         self.client.envoyer(
             "." 
-        )
-
-    def traduire_groupe(self, groupe):
-        if re.match("^([a-zA-Z0-9\.]+)$", groupe) is None:
-            return False 
-        while "." in groupe:
-            groupe = groupe.replace(".","/")
-            groupe = groupe.replace("//","/")
-        return groupe 
+        ) 
 
     def nntp_GROUP(self, r):
-        groupe = self.traduire_groupe(
+        groupe = groupe_traduire(
             r.group("groupe")
         ) 
         if groupe is False:
@@ -456,27 +632,38 @@ class NNTP_Protocole:
                 "430 No article with that id" 
             ) 
 
-    def nntp_AUTHINFO(self, r):
-        # 481 Authentication failed/rejected 
-        # 502 Command unavailable 
-        action = r.group("action").lower()
-        if action=="user":
-            self.utilisateur = r.group("info")
-            self.client.envoyer(
-                "381 Password required" 
-            )
-        elif action=="pass":
-            if not hasattr(self, "utilisateur"):
+    def nntp_AUTHINFO(self, r): 
+        try: 
+            action = r.group("action").lower() 
+            if action=="user": 
+                self.utilisateur = r.group("info") 
                 self.client.envoyer(
-                    "482 Authentication commands issued out of sequence" 
+                    "381 Password required" 
                 )
-                return 
-            else:
-                self.mdp = r.group("info")
-                self.client.envoyer(
-                    "281 Authentication accepted" 
-                )
-
+            elif action=="pass": 
+                if not hasattr(self, "utilisateur"):
+                    self.client.envoyer( 
+                        "482 Authentication commands issued out of sequence" 
+                    ) 
+                    return 
+                else:
+                    self.cId = utilisateur_verifier(
+                        self.utilisateur,
+                        r.group("info") 
+                    ) 
+                    if self.cId is not False: 
+                        self.client.envoyer(
+                            "281 Authentication accepted" 
+                        ) 
+                    else: 
+                        self.client.envoyer( 
+                            "481 Authentication failed/rejected" 
+                        ) 
+        except Exception as err: 
+            self.client.envoyer( 
+                "502 Command unavailable" 
+            ) 
+    
     def nntp_POST(self, r): 
         self.client.envoyer(
             "340 Input article; end with <CR-LF>.<CR-LF>" 
@@ -491,7 +678,8 @@ class NNTP_Protocole:
                     e = email.message_from_string(tampon)
                     for nom, valeur in e._headers: 
                         if nom.lower()=="newsgroups":
-                            chemin = self.traduire_groupe(
+                            print(valeur) 
+                            chemin = groupe_traduire(
                                 valeur
                             )
                     if chemin==False: 
@@ -558,6 +746,23 @@ class NNTP_Protocole:
             ) 
         ) 
 
+    def nntp_STAT(self, r):
+        # 223 numero id article exists 
+        # 412 no group selected 
+        # 420 (groupe vide) 
+        pass 
+
+    def nntp_STAT_NUMERO(self, r):
+        # 223 numero id article exists 
+        # 412 no group selected 
+        # 423 no article with this numero
+        pass 
+
+    def nntp_STAT_ID(self, r): 
+        # 223 0|numero id article exists 
+        # 430 no article with this id 
+        pass 
+
 class NNTP_Client(socketserver.StreamRequestHandler): 
 
     objProtocole = None
@@ -599,11 +804,18 @@ class Serveur(socketserver.TCPServer):
 
     allow_reuse_address = True 
 
-if __name__ == "__main__":
-    HOST, PORT = "localhost", 9999
+if __name__ == "__main__": 
 
-    with Serveur(
-        (HOST, PORT),
+    print(
+        "sys.argv",
+        sys.argv
+    ) 
+    
+    with Serveur( 
+        (
+            "localhost",
+            9999
+        ),
         NNTP_Client
     ) as server:
         server.serve_forever() 
