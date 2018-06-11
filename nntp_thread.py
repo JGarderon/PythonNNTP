@@ -16,6 +16,42 @@ import os
 import glob
 import email
 import time 
+from datetime import date 
+import datetime 
+import fnmatch 
+import math 
+
+### ### ### ### ### ### ### ### ###
+
+#!# Création du fichier log et de toutes les fonctions associées 
+import logging
+
+LOG_FORMAT_COURT = '%(asctime)s | %(levelname)s - %(thread)d - %(message)s' 
+LOG_FORMAT_LONG = '%(asctime)s | %(levelname)s - %(process)d::%(processName)s::%(thread)d - %(name)s - %(message)s' 
+logging.basicConfig(
+    level=logging.DEBUG,
+    format=LOG_FORMAT_LONG,
+    datefmt='%m-%d %H:%M',
+    filename="./.log", 
+    filemode='w' 
+)
+console = logging.StreamHandler()
+console.setLevel(
+    logging.INFO
+) 
+console.setFormatter(
+    logging.Formatter(
+        LOG_FORMAT_COURT 
+    )
+)
+logging.getLogger(
+    ''
+).addHandler( 
+    console
+)
+
+logging.debug("/!-début\ démarrage des logs")
+logging.info("démarrage du script")
 
 ### ### ### ### ### ### ### ### ###
 
@@ -31,8 +67,9 @@ NNTP_SERVEUR_INDISPONIBLE_TEMPORAIRE = False
 #!# La signature de reconnaissance du serveur
 ### Script initial mai 2017 
 ### Version 0.0.1 / démarrage du projet : 07 juin 2018 
-### Version 0.0.2 : 08 juin 2018 
-NNTP_SERVEUR_SIGNATURE = "nothus 0.0.2 nntp server"
+### Version 0.0.2 : 08 juin 2018
+### Version 0.0.3 : 11 juin 2018 
+NNTP_SERVEUR_SIGNATURE = "nothus 0.0.3 nntp server"
 
 ### ### ### ### ### ### ### ### ###
 
@@ -47,11 +84,56 @@ VERROU_LECTURE_SEULE = True
 
 NNTP_UTILISATEURS_SOURCE = "./utilisateurs" 
 NNTP_MESSAGES_SOURCE = "./sources" 
-NNTP_MESSAGES_EXT = "contenu"
+NNTP_MESSAGES_EXT = "contenu" 
 NNTP_MESSAGE_EXT = "message" 
-NNTP_MESSAGE_REF_EXT = "reference"
-NNTP_GROUPES_ARBORESCENCE = "./groupes"
+NNTP_MESSAGE_REF_EXT = "reference" 
+NNTP_GROUPES_ARBORESCENCE = "./.groupes" 
 NNTP_GROUPES_SOURCES = "." 
+
+### ### ### ### ### ### ### ### ### 
+
+#!# Création de quelques fichiers indipensables... 
+if not os.path.isfile( 
+    NNTP_GROUPES_ARBORESCENCE
+): 
+    logging.info(
+        "Création du fichier des groupes '%s'" % NNTP_GROUPES_ARBORESCENCE 
+    ) 
+    with open( 
+        NNTP_GROUPES_ARBORESCENCE,
+        "w"
+    ) as f:
+        f.write( 
+            "\t".join( 
+                (
+                    "nothus", 
+                    "0", 
+                    "0", 
+                    "0", 
+                    "n", 
+                    str( 
+                        math.floor( 
+                            time.time()
+                        ) 
+                    ), 
+                    "La racine du service" 
+                )
+            )
+        ) 
+
+### ### ### ### ### ### ### ### ###
+
+#!# Les entêtes supplémentaires gérés par le serveur.
+### Les entêtes supplémentaires doivent tous être
+### associés avec la mention ":full" (RFC 3977). 
+NNTP_MESSAGE_ENTETES_SUPP = [ 
+    entete+":full" for entete in [ 
+        "Resume", 
+        "Newsgroups", 
+        "Organization", 
+        "Publication" 
+    ] 
+] 
 
 ### ### ### ### ### ### ### ### ###
 
@@ -204,12 +286,25 @@ def article_traduire_id(aId, extraire=True):
         print("article_traduire_id", err) 
         return False 
 
+def groupes_lister(wm=None):
+    # path nbre mini maxi publier dateCreation 
+    with open(
+        NNTP_GROUPES_ARBORESCENCE,
+        "r",
+        encoding="utf-8" 
+    ) as f: 
+        while True: 
+            ligne = f.readline().strip()  
+            if ligne=="": 
+                break
+            yield ligne.split("\t") 
+
 ### ### ### ### ### ### ### ### ### 
 
 class NNTP_Protocole: 
 
     lecteur = False 
-    racineDefaut = "/home/julien/Développement/NNTP2"
+    racineDefaut = "./"
 
     commandes = {
         
@@ -231,19 +326,29 @@ class NNTP_Protocole:
             re.IGNORECASE
         ): "nntp_QUIT",
         
-        # Commandes de liste 
+        # Commandes d'entêtes
         re.compile(
             "^LIST OVERVIEW.FMT$",
             re.IGNORECASE
         ): "nntp_LIST_OVERVIEWFMT",
+        
+        # Commandes de liste 
         re.compile(
             "^LIST$",
             re.IGNORECASE
-        ): "nntp_LIST",
+        ): "nntp_LIST", 
         re.compile(
             "^LIST NEWSGROUPS$",
             re.IGNORECASE
-        ): "nntp_LIST_NEWSGROUPS",
+        ): "nntp_LIST_NEWSGROUPS", 
+        re.compile(
+            "^LIST NEWSGROUPS(?P<wildmat> [a-z\.\?\*\,]+)?$",
+            re.IGNORECASE
+        ): "nntp_LIST_NEWSGROUPS_WILDMAT", 
+        re.compile(
+            "^NEWGROUPS (?P<date>[0-9]{6,8}) (?P<heure>[0-9]{6})(?P<gmt>\ GMT)?$",
+            re.IGNORECASE
+        ): "nntp_NEWGROUPS",
         re.compile(
             "^GROUP (?P<groupe>[a-z0-9\.]+)$",
             re.IGNORECASE
@@ -276,6 +381,10 @@ class NNTP_Protocole:
             "^HEAD (?P<article>[0-9]+)$",
             re.IGNORECASE
         ): "nntp_HEAD_NUMERO", 
+        re.compile( 
+            "^HEAD (?P<uri>\<(?P<articleId>[0-9a-z\-\_]+)(\@(?P<domaine>[^\s\>]*))\>)$",
+            re.IGNORECASE
+        ): "nntp_HEAD_ID", 
         re.compile(
             "^ARTICLE$",
             re.IGNORECASE
@@ -285,7 +394,7 @@ class NNTP_Protocole:
             re.IGNORECASE
         ): "nntp_ARTICLE_NUMERO", 
         re.compile(
-            "^ARTICLE \<(?P<articleId>[0-9a-z\-\_]+)(\@(?P<domaine>[^\s\>]*))\>$",
+            "^ARTICLE (?P<uri>\<(?P<articleId>[0-9a-z\-\_]+)(\@(?P<domaine>[^\s\>]*))\>)$",
             re.IGNORECASE
         ): "nntp_ARTICLE_ID", 
         
@@ -359,7 +468,11 @@ class NNTP_Protocole:
                     return 
 
     def recuperer_article(self, path, articleNumero, articleId, entete=True, corps=True): 
-        with open(path, "r") as f: 
+        with open(
+            path,
+            "r",
+            encoding="utf-8"
+        ) as f: 
             self.client.envoyer( 
                 "220 %s %s"%( 
                     articleNumero,
@@ -401,8 +514,7 @@ class NNTP_Protocole:
         ) 
         if VERROU_LECTURE_SEULE:
             self.client.envoyer(
-                (
-                    "101 server capabilities",
+                ( 
                     "VERSION 2", 
                     "READER", 
                     "LIST ACTIVE NEWSGROUPS", 
@@ -439,7 +551,7 @@ class NNTP_Protocole:
             self.client.stopper()
         else: 
             self.lecteur = True 
-            self.client.envoyer(
+            self.client.envoyer( 
                 "%s Server ready, posting %s allowed"%(
                     (
                         201 if VERROU_LECTURE_SEULE==True else 200 
@@ -459,49 +571,211 @@ class NNTP_Protocole:
             "205 connection will be closed immediatly" 
         ) 
         self.client.stopper() 
-
+    
     def nntp_LIST_OVERVIEWFMT(self, r):
-        self.client.envoyer( 
-            (
-                "215 list of newsgroups follows", 
-                "Subject:", 
-                "From:", 
-                "Date:", 
-                "Message-ID:", 
-                "References:", 
-                ":bytes", 
-                ":lines", 
-                "." 
-            ) 
-        )
+        """     Commande "LIST OVERVIEW.FMT"
+        -> indique les entêtes gérés et exploitables par le
+        serveur, en fonction des besoins d'informations du
+        client.
 
-    def nntp_LIST_NEWSGROUPS(self, r): 
+        nb :
+        - les 7 premiers champs sont réservés par la RFC et
+        ne sont pas exploitables pour une extension privée ;
+        - le programme ci-présent permet nativement d'étendre
+        l'indexation et la recherche à de nouveaux entêtes. 
+        """
+        lignes = [
+            "215 list of newsgroups follows", 
+            "Subject:", 
+            "From:", 
+            "Date:", 
+            "Message-ID:", 
+            "References:", 
+            ":bytes", 
+            ":lines", 
+        ]+NNTP_MESSAGE_ENTETES_SUPP+[
+            ".", 
+        ]
         self.client.envoyer( 
-            "KO pas encore implementee" 
+            lignes  
         )
 
     def nntp_LIST(self, r): 
+        """     Commande "LIST"
+        -> c'est la commande principale pour récupérer la liste des
+        groupes disponibles sur le serveur.
+
+        nb : c'est la seule commande de listage qui n'utilise ni limite
+        ni classement notable. 
+        """ 
         self.client.envoyer( 
-            "215 list of newsgroups follows" 
+            "215 list of newgroups follows" 
         )
-        with open(
-            "%s/.groupes"%self.racineDefaut,
-            "r"
-        ) as f: 
-            while True: 
-                ligne = f.readline().strip()  
-                if ligne=="": 
-                    break 
-                while "\t" in ligne: 
-                	ligne = ligne.replace("\t", " ")
-                self.client.envoyer(  
-                    ligne 
+        for groupe in groupes_lister():
+            nom, nbre, minNum, maxNum, publier, dateCrea, description = groupe 
+            self.client.envoyer(  
+                " ".join(
+                    ( 
+                        nom, 
+                        maxNum,
+                        minNum,
+                        publier
+                    ) 
                 ) 
+            ) 
         self.client.envoyer(
             "." 
+        )
+
+##    def nntp_LIST_NEWSGROUPS(self, r):
+##        """     Commande "NEWSGROUPS"
+##        -> filtre les groupes et récupérer le noms "humains"
+##        de chaque groupe (une courte description); 
+##        """
+##        lignes = [ 
+##            "215 list of newgroups follows",  
+##        ]
+##        w = r.group("wildmat") 
+##        if w is not None:
+##            w = w.strip() 
+##        for groupe in groupes_lister():
+##            etat = True 
+##            nom, nbre, minNum, maxNum, publier, dateCrea, description = groupe
+##            if w is not None: 
+##                if not fnmatch.fnmatch( 
+##                    nom,
+##                    w  
+##                ): 
+##                    etat = False 
+##            if etat: 
+##                lignes.append( 
+##                    "%s %s"%(
+##                        nom,
+##                        description 
+##                    ) 
+##                ) 
+##                
+##        lignes.append( 
+##            "." 
+##        ) 
+##        self.client.envoyer( 
+##            lignes 
+##        ) 
+
+    def nntp_LIST_NEWSGROUPS(self, r):
+        """     Commande "LIST NEWSGROUPS"
+        -> liste tous les groupes en indiquant le noms "humains"
+        (une courte description) de chacun d'entre eux, sans aucun
+        tri ou aucune limitation. 
+
+        nb : cela ne préjuge pas que la liste soit complète au 
+        moment de la transmission (cf RFC). 
+        """
+        lignes = [ 
+            "215 list of newgroups follows",  
+        ]
+        for groupe in groupes_lister():
+            lignes.append( 
+                "%s %s"%(
+                    nom,
+                    description 
+                ) 
+            ) 
+        lignes.append( 
+            "." 
+        ) 
+        self.client.envoyer( 
+            lignes 
+        ) 
+
+    def nntp_LIST_NEWSGROUPS_WILDMAT(self, r):
+        """     Commande "LIST NEWSGROUPS (+wildmat)"
+        -> filtre les groupes en fonction d'un pattern wildmat
+        fourni par le client, afin de récupérer le noms "humains"
+        de chaque groupe (une courte description). 
+
+        nb : cela ne préjuge pas que la liste soit complète au 
+        moment de la transmission (cf RFC). 
+        """
+        lignes = [ 
+            "215 list of newgroups follows",  
+        ]
+        w = r.group("wildmat") 
+        if w is not None:
+            w = w.strip() 
+        for groupe in groupes_lister():
+            etat = True 
+            nom, nbre, minNum, maxNum, publier, dateCrea, description = groupe
+            if w is not None: 
+                if not fnmatch.fnmatch( 
+                    nom,
+                    w  
+                ): 
+                    etat = False 
+            if etat: 
+                lignes.append( 
+                    "%s %s"%(
+                        nom,
+                        description 
+                    ) 
+                ) 
+                
+        lignes.append( 
+            "." 
+        ) 
+        self.client.envoyer( 
+            lignes 
+        ) 
+
+    def nntp_NEWGROUPS(self, r): 
+        """     Commande "NEWGROUPS"
+        -> permet la récupération des nouveaux groupes, sans restriction
+        de nom, et qui ont été créé à partir d'une date fournie par le client. 
+
+        nb : cela ne préjuge pas que la liste soit complète au 
+        moment de la transmission (cf RFC). 
+        """ 
+        vouluDate, vouluHeure, vouluGMT = r.groups() 
+        vouluGMT = False if vouluGMT is None else True 
+        tempsVoulu = datetime.datetime.strptime( 
+            "%s%s"%(
+                vouluDate,
+                vouluHeure
+            ),
+            "%Y%m%d%H%M%S" 
+        )
+        lignes = [ 
+            "231 list of newgroups follows",  
+        ] 
+        for groupe in groupes_lister(): 
+            nom, nbre, minNum, maxNum, publier, dateCrea, description = groupe 
+            dateCrea = datetime.datetime.fromtimestamp( 
+                int( 
+                    dateCrea 
+                ) 
+            ) 
+            if dateCrea<=tempsVoulu: 
+                lignes.append( 
+                    " ".join( 
+                        ( 
+                            nom, 
+                            maxNum, 
+                            minNum, 
+                            publier 
+                        ) 
+                    ) 
+                ) 
+        lignes.append( 
+            "." 
+        ) 
+        self.client.envoyer( 
+            lignes 
         ) 
 
     def nntp_GROUP(self, r):
+        """     Commande "GROUP"
+        -> indique au serveur le groupe sur lequel le client travaille. 
+        """ 
         groupe = groupe_traduire(
             r.group("groupe")
         ) 
@@ -515,8 +789,12 @@ class NNTP_Protocole:
         ) 
         if os.path.isdir(racine):
             try:
-                with open("%s/.statistique"%racine,"r") as f:
-                    etat, nbre, mini, maxi, groupe = f.readline().strip().split("\t")
+                with open( 
+                    "%s/.statistique"%racine, 
+                    "r", 
+                    encoding="utf-8" 
+                ) as f: 
+                    etat, nbre, mini, maxi, groupe = f.readline().strip().split("\t") 
                 self.groupe = groupe
                 self.racine = racine
                 self.client.envoyer( 
@@ -556,7 +834,11 @@ class NNTP_Protocole:
             if os.path.isfile(
                 path 
             ):
-                with open(path, "r") as f:
+                with open(
+                    path,
+                    "r",  
+                    encoding="utf-8"
+                ) as f:
                     uid = f.readline().strip() 
                     self.client.envoyer(
                         f.readline().strip() 
@@ -574,7 +856,14 @@ class NNTP_Protocole:
         self.nntp_ARTICLE_NUMERO(
             r,
             entete=True,
-            corps=True 
+            corps=False 
+        ) 
+
+    def nntp_HEAD_ID(self, r):
+        self.nntp_ARTICLE_ID(
+            r, 
+            entete=True,
+            corps=False 
         ) 
 
     def nntp_ARTICLE(self, r): 
@@ -597,15 +886,23 @@ class NNTP_Protocole:
                     self.racine,
                     r.group("article")
                 ),
-                "r"
+                "r", 
+                encoding="utf-8" 
             ) as f: 
-                uid = f.readline().strip() 
+                aId = f.readline().strip() 
             self.recuperer_article( 
-                "./sources/%s.contenu"%uid, 
+                "%s/%s.%s"%( 
+                    NNTP_MESSAGES_SOURCE, 
+                    aId,
+                    NNTP_MESSAGES_EXT 
+                ), 
                 r.group("article"),
-                uid, 
+                aId, 
                 entete, 
                 corps 
+            )
+            self.articleNumero = int(
+                r.group("article")
             ) 
         except Exception as err: 
             print(err) 
@@ -613,19 +910,23 @@ class NNTP_Protocole:
                 "423 No article with that number" 
             )
 
-    def nntp_ARTICLE_ID(self, r):
+    def nntp_ARTICLE_ID(self, r, entete=True, corps=True):
         try:
-            articleId_chemin = "%s/ids/message-%s.id"%( 
-                self.racine, 
-                r.group("articleId") 
+            aId, aNum = article_chercher_numero(
+                r.group("articleId"),
+                groupe = self.racine,
+                traduire_groupe = False
             ) 
-            with open(articleId_chemin, "r") as f: 
-                chemin = f.read().strip() 
-            self.recuperer_article(
-                os.path.join( 
-                    self.racine, 
-                    chemin 
-                ) 
+            self.recuperer_article( 
+                "%s/%s.%s"%( 
+                    NNTP_MESSAGES_SOURCE, 
+                    aId, 
+                    NNTP_MESSAGES_EXT 
+                ), 
+                0 if aNum is False else aNum, 
+                r.group("uri"), 
+                entete, 
+                corps 
             ) 
         except Exception: 
             self.client.envoyer(
@@ -722,7 +1023,6 @@ class NNTP_Protocole:
         """     Commande "DATE"
         -> signale le temps coordonné universel (UTC) du
         point de vue du serveur 
-
         Le protocole prévu par la RFC 3977, prévoit que cette 
         commande soit déclaré implicitement avec la capacité
          annoncée "READER". 
@@ -768,14 +1068,19 @@ class NNTP_Client(socketserver.StreamRequestHandler):
     objProtocole = None
     continuer = True
 
-    debug = True 
-
+    debug = True
+    
     def envoyer(self, m):
         if isinstance(m, str): 
             m = (m,)
         for ligne in m:
             if self.debug:
-                print("<<<\t", ligne) 
+                logging.debug(
+                    "[%s:%s] <<<\t %s" % (
+                        *self.client_address,
+                        ligne
+                    ) 
+                ) 
             self.wfile.write(
                 (ligne.strip()+"\r\n").encode("utf-8") 
             ) 
@@ -783,39 +1088,57 @@ class NNTP_Client(socketserver.StreamRequestHandler):
     def recevoir(self):
         ligne = self.rfile.readline().decode("utf-8").strip() 
         if self.debug:
-            print(">>>\t", ligne) 
+            logging.debug( 
+                "[%s:%s] >>>\t %s" % (
+                    *self.client_address,
+                    ligne
+                ) 
+            ) 
         return ligne
 
     def stopper(self):
+        logging.debug( 
+            "[%s:%s] ===\t stop" % self.client_address 
+        ) 
         self.continuer = False 
 
-    def handle(self): 
-        if self.debug:
-            print("arrivé d'un nouveau client") 
+    def handle(self):  
+        logging.info(
+            "[%s:%s] client entrant" % self.client_address
+        ) 
         self.objProtocole = NNTP_Protocole( 
             self 
         ) 
         while self.continuer: 
             self.objProtocole.resoudre() 
-        if self.debug:
-            print("départ d'un client") 
+        logging.info(
+            "[%s:%s] client sortant" % self.client_address
+        ) 
             
 class Serveur(socketserver.TCPServer):
 
     allow_reuse_address = True 
 
 if __name__ == "__main__": 
+    try: 
+        hote, port = "localhost", 9999 
+        with Serveur( 
+            (hote, port),
+            NNTP_Client
+        ) as serveur: 
+            logging.info( 
+                "service démarré sur %s:%s" % (hote, port)
+            ) 
+            serveur.serve_forever()
+        logging.debug("service arrêté")
+    except KeyboardInterrupt: 
+        logging.info("fin du programme (interruption clavier)")
+    except Exception as err:
+        print(err) 
+        logging.info("fin du programme (erreur fatale)") 
+    finally: 
+        logging.debug("/!-fin\ fin des logs") 
 
-    print(
-        "sys.argv",
-        sys.argv
-    ) 
+
+
     
-    with Serveur( 
-        (
-            "localhost",
-            9999
-        ),
-        NNTP_Client
-    ) as server:
-        server.serve_forever() 
