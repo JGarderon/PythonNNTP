@@ -37,7 +37,7 @@ logging.basicConfig(
 )
 console = logging.StreamHandler()
 console.setLevel(
-    logging.INFO
+    logging.DEBUG
 ) 
 console.setFormatter(
     logging.Formatter(
@@ -69,8 +69,9 @@ NNTP_SERVEUR_INDISPONIBLE_TEMPORAIRE = False
 ### Version 0.0.1 / démarrage du projet : 07 juin 2018 
 ### Version 0.0.2 : 08 juin 2018
 ### Version 0.0.3 : 11 juin 2018
-### Version 0.0.4 : 12 juin 2018 
-NNTP_SERVEUR_SIGNATURE = "nothus 0.0.4 nntp server"
+### Version 0.0.4 : 12 juin 2018
+### Version 0.0.5 : 13 juin 2018 
+NNTP_SERVEUR_SIGNATURE = "nothus 0.0.5 nntp server"
 
 ### ### ### ### ### ### ### ### ###
 
@@ -89,7 +90,9 @@ NNTP_MESSAGES_EXT = "contenu"
 NNTP_MESSAGE_EXT = "message" 
 NNTP_MESSAGE_REF_EXT = "reference" 
 NNTP_GROUPES_ARBORESCENCE = "./.groupes" 
-NNTP_GROUPES_SOURCES = "." 
+NNTP_GROUPES_SOURCES = "."
+NNTP_GROUPE_STATISTIQUE = ".statistique" 
+NNTP_MESSAGES_ANNUAIRE = ".annuaire" 
 
 ### ### ### ### ### ### ### ### ### 
 
@@ -120,7 +123,7 @@ if not os.path.isfile(
                     "La racine du service" 
                 )
             )
-        ) 
+        )
 
 ### ### ### ### ### ### ### ### ###
 
@@ -153,7 +156,7 @@ def utilisateur_hasher(courriel, mdp):
     ).hexdigest() 
     pId = hashlib.sha256(
         (courriel+mdp).encode("utf-8") 
-    ).hexdigest()
+    ).hexdigest() 
     return cId, pId 
 
 def utilisateur_creer(courriel, mdp): 
@@ -178,15 +181,20 @@ def utilisateur_creer(courriel, mdp):
                 pId
             )
         return True
-    except Exception as err:
-        print("utilisateur_creer", err)
+    except Exception as err: 
+        logging.ERROR(
+            "[BDD] utilisateur::creer '%s' impossible : %s" % (
+                courriel,
+                err
+            ) 
+        ) 
         return False
     
 def utilisateur_verifier(courriel, mdp):
     """
         Savoir si un client qui s'authentifie, correspond bien à un
         utilisateur ou non. 
-    """
+    """ 
     try:
         cId, pId = utilisateur_hasher(
             courriel,
@@ -201,10 +209,18 @@ def utilisateur_verifier(courriel, mdp):
         ) as f: 
             passe = f.readline().strip() 
             if passe==pId:
+                logging.info(
+                    "utilisateur %s authentifié" % courriel
+                ) 
                 return cId
         return False
-    except Exception as err:
-        print("utilisateur_creer", err)
+    except Exception as err: 
+        logging.ERROR(
+            "[BDD] utilisateur::verifier '%s' impossible : %s" % (
+                courriel,
+                err
+            ) 
+        )
         return False
     
 def groupe_traduire(groupe): 
@@ -215,66 +231,78 @@ def groupe_traduire(groupe):
         groupe = groupe.replace("//","/")
     return groupe 
 
-def article_chercher_id(numero, groupe="", traduire_groupe=True): 
+def groupe_existe(groupe, traduire_groupe=True):
     if traduire_groupe: 
         pathGroupe = groupe_traduire( 
             groupe
         )
     else:
         pathGroupe = groupe
-    aId = False 
-    if pathGroupe is not False: 
-        pathRef = "%s/%s/%s.%s" % (
-                NNTP_GROUPES_SOURCES,
-                pathGroupe,
-                numero, 
-                NNTP_MESSAGE_EXT
-        ) 
-        if os.path.isfile(
-            pathRef
-        ): 
-            with open(
-                pathRef,
-                "r"
-            ) as f:
-                aId = f.readline()
-    return (aId, numero) 
+    if pathGroupe is False: 
+        return False
+    racine = os.path.join(
+        NNTP_GROUPES_SOURCES+"/", 
+        pathGroupe  
+    ) 
+    if not os.path.isdir(
+        racine 
+    ): 
+        return False
+    return (
+        groupe,
+        racine
+    ) 
+
+def groupe_statistiques(pathGroupe):
+    with open( 
+        "%s/%s" % (
+            pathGroupe,
+            NNTP_GROUPE_STATISTIQUE
+        ), 
+        "r", 
+        encoding="utf-8" 
+    ) as f: 
+        return f.readline().strip().split("\t")
+
+def groupe_lister(groupe, traduire_groupe=True):  
+    if traduire_groupe: 
+        pathGroupe = groupe_traduire( 
+            groupe
+        )
+    else:
+        pathGroupe = groupe 
+    with open( 
+        "%s/%s" % ( 
+            pathGroupe, 
+            NNTP_MESSAGES_ANNUAIRE 
+        ), 
+        "r", 
+        encoding="utf-8" 
+    ) as f:
+        while True: 
+            ligne = f.readline()
+            if ligne=="":
+                break
+            yield ligne.strip().split("\t") 
+
+def article_chercher_id(numero, groupe="", traduire_groupe=True):
+    numero = int(numero) 
+    for message in groupe_lister(
+        groupe,
+        traduire_groupe
+    ):
+        if numero==int(message[0]):
+            return (message[1], numero)
+    return (False, numero) 
 
 def article_chercher_numero(aId, groupe="", traduire_groupe=True): 
-    if traduire_groupe: 
-        pathGroupe = groupe_traduire( 
-            groupe
-        )
-    else:
-        pathGroupe = groupe
-    numero = False 
-    if pathGroupe is not False: 
-        pathRef = "%s/%s/%s.%s" % (
-                NNTP_GROUPES_SOURCES,
-                pathGroupe,
-                aId, 
-                NNTP_MESSAGE_REF_EXT
-        ) 
-        if os.path.isfile(
-            pathRef
-        ): 
-            with open(
-                pathRef,
-                "r"
-            ) as f:
-                numero = int(
-                    f.readline()
-                ) 
-    chemin = "%s/%s.%s" % (
-        NNTP_MESSAGES_SOURCE,
-        aId,
-        NNTP_MESSAGES_EXT
-    ) 
-    if os.path.isfile(
-        chemin 
+    for message in groupe_lister(
+        groupe,
+        traduire_groupe
     ):
-        return (aId, numero) 
-    return False 
+        if aId==message[1]:
+            return (aId, int(message[0]))
+    return False
 
 def article_traduire_id(aId, extraire=True):
     try:
@@ -284,8 +312,10 @@ def article_traduire_id(aId, extraire=True):
                 aId
             ).groups()[0] 
     except Exception as err:
-        print("article_traduire_id", err) 
-        return False 
+        logging.ERROR(
+            "[BDD] article::traduireId impossible : %s" % err 
+        )
+    return False 
 
 def article_recuperer(path, articleNumero, articleId, entete=True, corps=True):
     with open(
@@ -358,7 +388,7 @@ class NNTP_Protocole:
         # Commandes d'entêtes
         re.compile(
             "^LIST OVERVIEW.FMT$",
-            re.IGNORECASE
+            re.IGNORECASE 
         ): "nntp_LIST_OVERVIEWFMT", 
         
         # Commandes de listes et de groupes 
@@ -367,27 +397,29 @@ class NNTP_Protocole:
             re.IGNORECASE
         ): "nntp_LIST", 
         re.compile(
-            "^LIST NEWSGROUPS$",
+            "^LIST NEWSGROUPS$", 
             re.IGNORECASE
         ): "nntp_LIST_NEWSGROUPS", 
         re.compile(
-            "^LIST NEWSGROUPS(?P<wildmat> [a-z\.\?\*\,]+)?$",
+            "^LIST NEWSGROUPS(?P<wildmat> [a-z\.\?\*\,]+)?$", 
             re.IGNORECASE
         ): "nntp_LIST_NEWSGROUPS_WILDMAT", 
         re.compile(
-            "^NEWGROUPS(?P<wildmat> [a-z\.\?\*\,]+)? (?P<date>[0-9]{6,8}) (?P<heure>[0-9]{6})(?P<gmt>\ GMT)?$",
+            "^NEWGROUPS(?P<wildmat> [a-z\.\?\*\,]+)? (?P<date>[0-9]{6,8}) (?P<heure>[0-9]{6})(?P<gmt>\ GMT)?$", 
             re.IGNORECASE
         ): "nntp_NEWGROUPS", 
         re.compile(
-            "^NEWNEWS(?P<wildmat> [a-z\.\?\*\,]+)? (?P<date>[0-9]{6,8}) (?P<heure>[0-9]{6})(?P<gmt>\ GMT)?$",
+            "^NEWNEWS(?P<wildmat> [a-z\.\?\*\,]+)? (?P<date>[0-9]{6,8}) (?P<heure>[0-9]{6})(?P<gmt>\ GMT)?$", 
             re.IGNORECASE
-        ): "nntp_NEWNEWS",
+        ): "nntp_NEWNEWS", 
         re.compile(
-            "^GROUP (?P<groupe>[a-z0-9\.]+)$",
+            "^GROUP (?P<groupe>[a-z0-9\.]+)$", 
             re.IGNORECASE
-        ): "nntp_GROUP",
+        ): "nntp_GROUP", 
+
+        # Commande de récupération de portion de groupe 
         re.compile(
-            "^XOVER (?P<mini>[0-9]+)\-(?P<maxi>[0-9]+)$",
+            "^(?P<x>X)?OVER (?P<mini>[0-9]+)\-(?P<maxi>[0-9]+)$", 
             re.IGNORECASE
         ): "nntp_XOVER_RANGE", 
         
@@ -476,11 +508,16 @@ class NNTP_Protocole:
                     )
                     return 
 
-    def recuperer_article(self, path, articleNumero, articleId, entete=True, corps=True): 
+    def envoyer_article(self, aNum, aId, entete=True, corps=True): 
+        path = "%s/%s.%s" % ( 
+            NNTP_MESSAGES_SOURCE, 
+            aId, 
+            NNTP_MESSAGES_EXT 
+        ) 
         self.client.envoyer( 
             "220 %s %s"%( 
-                articleNumero,
-                articleId
+                aNum,
+                aId
             ) 
         )
         for ligne in article_recuperer(
@@ -494,7 +531,8 @@ class NNTP_Protocole:
             ) 
         self.client.envoyer( 
             "." 
-        ) 
+        )
+        return path 
 
     def nntp_CAPABILITIES(self, r):
         """     Commande "CAPABILITIES"
@@ -648,7 +686,7 @@ class NNTP_Protocole:
 
     def nntp_LIST_NEWSGROUPS_WILDMAT(self, r):
         """     Commande "LIST NEWSGROUPS (+wildmat)"
-        -> filtre les groupes en fonction d'un pattern wildmat
+        -> filtre les groupes en fonction d'un pattern wildmat 
         fourni par le client, afin de récupérer le noms "humains"
         de chaque groupe (une courte description). 
 
@@ -809,45 +847,37 @@ class NNTP_Protocole:
 
     def nntp_GROUP(self, r):
         """     Commande "GROUP"
-        -> indique au serveur le groupe sur lequel le client travaille. 
-        """ 
-        groupe = groupe_traduire(
+        -> indique au serveur le groupe sur lequel le client travaille.
+
+        nb: le fichier statistique "écrase" la valeur par défaut le nom
+        du groupe, sans en changer la racine. 
+        """
+        r = groupe_existe( 
             r.group("groupe")
         ) 
-        if groupe is False:
+        if r is False:
             return self.client.envoyer( 
                 "411 No such newsgroup" 
             )
-        racine = os.path.join(
-            self.racineDefaut+"/",
-            groupe
-        ) 
-        if os.path.isdir(racine):
-            try:
-                with open( 
-                    "%s/.statistique"%racine, 
-                    "r", 
-                    encoding="utf-8" 
-                ) as f: 
-                    etat, nbre, mini, maxi, groupe = f.readline().strip().split("\t") 
-                self.groupe = groupe
-                self.racine = racine
-                self.client.envoyer( 
-                    "211 %s %s %s %s"%( 
-                        nbre,
-                        mini,
-                        maxi,
-                        groupe
-                    ) 
-                )
-            except Exception as err:
-                print(err) 
-                self.client.envoyer( 
-                    "411 groupe indisponible" 
-                ) 
-        else: 
+        groupe, racine = r 
+        try: 
+            etat, nbre, mini, maxi, groupe = groupe_statistiques(
+                racine
+            )
+            self.groupe = groupe 
+            self.racine = racine 
             self.client.envoyer( 
-                "411 No such newsgroup" 
+                "211 %s %s %s %s"%( 
+                    nbre, 
+                    mini, 
+                    maxi, 
+                    groupe 
+                ) 
+            ) 
+        except Exception as err: 
+            print(err) 
+            self.client.envoyer( 
+                "411 groupe indisponible" 
             ) 
 
     def nntp_XOVER_RANGE(self, r):
@@ -857,30 +887,29 @@ class NNTP_Protocole:
             )
             return 
         mini = int(r.group("mini"))
-        maxi = int(r.group("maxi"))+1
+        maxi = int(r.group("maxi")) 
         self.client.envoyer(
             "224 Overview information follows" 
         ) 
-        for i in range(mini, maxi):
-            path = "%s/%s.message"%(
-                self.racine,
-                i
-            )
-            if os.path.isfile(
-                path 
-            ):
-                with open(
-                    path,
-                    "r",  
-                    encoding="utf-8"
-                ) as f:
-                    uid = f.readline().strip() 
-                    self.client.envoyer(
-                        f.readline().strip() 
+        for message in groupe_lister(
+            self.racine,
+            traduire_groupe=False
+        ):
+            mNumero = int(
+                message[0]
+            ) 
+            if mNumero>=mini and mNumero<=maxi:
+                self.client.envoyer(
+                    "\t".join(
+                        [
+                            message[0],
+                            *message[2:]
+                        ]
                     ) 
+                ) 
         self.client.envoyer( 
             "." 
-        )
+        ) 
     
     def nntp_PARTIE(self, r):
         partie = r.group("partie").lower()
@@ -899,23 +928,23 @@ class NNTP_Protocole:
     def nntp_PARTIE_NUMERO(self, r):
         partie = r.group("partie").lower()
         if partie=="article": 
-            self.nntp_ARTICLE_NUMERO(
+            self.nntp_ARTICLE_NUMERO( 
                 r
             ) 
         elif partie=="head":
-            self.nntp_ARTICLE_NUMERO(
+            self.nntp_ARTICLE_NUMERO( 
                 r,
                 entete=True,
                 corps=False 
             ) 
         elif partie=="body":
-            self.nntp_ARTICLE_NUMERO(
+            self.nntp_ARTICLE_NUMERO( 
                 r, 
                 entete=False,
                 corps=True 
             ) 
         elif partie=="stat":
-            self.nntp_STAT_NUMERO(
+            self.nntp_STAT_NUMERO( 
                 r
             ) 
         
@@ -956,30 +985,17 @@ class NNTP_Protocole:
             self.client.envoyer( 
                 "412 No newsgroup selected"
             ) 
-        try: 
-            with open( 
-                "%s/%s.message"%( 
-                    self.racine,
-                    r.group("article")
-                ),
-                "r", 
-                encoding="utf-8" 
-            ) as f: 
-                aId = f.readline().strip() 
-            self.recuperer_article( 
-                "%s/%s.%s"%( 
-                    NNTP_MESSAGES_SOURCE, 
-                    aId,
-                    NNTP_MESSAGES_EXT 
-                ), 
+        try:
+            aId, aNum = article_chercher_id(
                 r.group("article"),
-                aId, 
-                entete, 
-                corps 
-            )
-            self.articleNumero = int(
-                r.group("article")
+                self.racine,
+                traduire_groupe=False
             ) 
+            self.envoyer_article( 
+                aNum, 
+                aId 
+            ) 
+            self.articleNumero = aNum 
         except Exception as err: 
             print(err) 
             self.client.envoyer(
@@ -993,12 +1009,7 @@ class NNTP_Protocole:
                 groupe = self.racine,
                 traduire_groupe = False
             ) 
-            self.recuperer_article( 
-                "%s/%s.%s"%( 
-                    NNTP_MESSAGES_SOURCE, 
-                    aId, 
-                    NNTP_MESSAGES_EXT 
-                ), 
+            self.envoyer_article( 
                 0 if aNum is False else aNum, 
                 r.group("uri"), 
                 entete, 
